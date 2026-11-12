@@ -189,7 +189,7 @@ fn tracked_files_carry_no_personal_data() {
     }
     let files = tracked_files();
     assert!(
-        files.iter().any(|f| f == "Cargo.toml") && files.len() > 10,
+        files.iter().any(|f| f == "Cargo.toml") && files.len() > 20,
         "the file list is incomplete: {files:?}"
     );
     let mut findings = Vec::new();
