@@ -14,9 +14,9 @@ fn resources() -> Vec<Value> {
     r.header().expect("a header");
     let mut out = Vec::new();
     loop {
-        match r.next_item() {
+        match r.next() {
             Some(Ok(Item::Resource(raw))) => out.push(raw.value().unwrap()),
-            Some(Ok(Item::End(t))) => {
+            Some(Ok(Item::Trailer(t))) => {
                 assert!(t.complete);
                 break;
             }
@@ -24,7 +24,7 @@ fn resources() -> Vec<Value> {
             None => panic!("no trailer"),
         }
     }
-    assert!(r.next_item().is_none());
+    assert!(r.next().is_none());
     out
 }
 

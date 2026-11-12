@@ -37,7 +37,7 @@ use crate::model::{
 use crate::normalize;
 use crate::people;
 use crate::proc::{which, Bounded};
-use crate::stream::{self, Header, Item, RawResource, RecordsReader};
+use crate::stream::{self, Header, Item, RawResource, RecordsReader, Skip};
 
 /// Provider CLIs medrec looks for without being told.
 pub const KNOWN_PROVIDERS: &[&str] = &["mychart", "kp", "athena", "uhc"];
@@ -211,7 +211,7 @@ struct Streamed {
     trailer: stream::Trailer,
     resources: Vec<RawResource>,
     binaries: Vec<Binary>,
-    skipped: Vec<Value>,
+    skipped: Vec<Skip>,
 }
 
 pub fn run(
@@ -241,22 +241,20 @@ pub fn run(
         cmd = cmd.args(["--org", o.as_str()]);
     }
     let mut child = cmd.stream()?;
-    let tee = Tee {
+    let mut tee = Tee {
         inner: child.stdout(),
         hasher: Sha256::new(),
         bytes: 0,
     };
-    let mut reader = RecordsReader::new(BufReader::with_capacity(256 * 1024, tee));
+    let mut reader = RecordsReader::new(BufReader::with_capacity(256 * 1024, &mut tee));
     let read = read_stream(&mut reader, max_binary);
     let streamed = match read {
         Ok(v) => v,
         Err(e) => {
-            drop(reader);
             let finished = child.finish_within(Duration::from_secs(5));
             return Err(stream_failure(&req.from, e, finished, req.org.as_deref()));
         }
     };
-    let tee = reader.into_inner().into_inner();
     let (stream_sha, stream_bytes) = (hash::hex(&tee.hasher.finalize()), tee.bytes);
     let finished = child.finish()?;
     if finished.status.code() != Some(0) {
@@ -447,12 +445,12 @@ fn read_stream<R: std::io::BufRead>(
     reader: &mut RecordsReader<R>,
     max_binary: u64,
 ) -> Result<Streamed, ReadFailure> {
-    let header = reader.header().map_err(ReadFailure::Stream)?;
+    let header = reader.header().map_err(ReadFailure::Stream)?.clone();
     let mut resources = Vec::new();
     let mut binaries = Vec::new();
     let mut skipped = Vec::new();
     let trailer = loop {
-        match reader.next_item() {
+        match reader.next() {
             Some(Ok(Item::Resource(raw))) => {
                 if raw.resource_type == "Binary" {
                     let v = raw
@@ -471,10 +469,12 @@ fn read_stream<R: std::io::BufRead>(
                             ReadFailure::Other(format!("Binary {} carries no valid base64", raw.id))
                         })?;
                     if bytes.len() as u64 > max_binary {
-                        skipped.push(serde_json::json!({
-                            "resource_type": "Binary", "id": raw.id,
-                            "reason": "larger than config max_file_mb", "code": "too_large"
-                        }));
+                        skipped.push(Skip::resource(
+                            "Binary",
+                            raw.id.clone(),
+                            pk_med_records::stream::skip::TOO_LARGE,
+                            "larger than config max_file_mb",
+                        ));
                     } else if !bytes.is_empty() {
                         binaries.push(Binary {
                             id: raw.id.clone(),
@@ -488,17 +488,13 @@ fn read_stream<R: std::io::BufRead>(
                 }
                 resources.push(raw);
             }
-            Some(Ok(Item::End(t))) => break t,
+            Some(Ok(Item::Trailer(t))) => break t,
             Some(Err(e)) => return Err(ReadFailure::Stream(e)),
-            None => {
-                return Err(ReadFailure::Stream(stream::StreamError::TrailerMissing {
-                    lines: 0,
-                }))
-            }
+            None => return Err(ReadFailure::Stream(stream::StreamError::MissingTrailer)),
         }
     };
     // Read to the end so a line after the trailer is refused.
-    if let Some(Err(e)) = reader.next_item() {
+    if let Some(Err(e)) = reader.next() {
         return Err(ReadFailure::Stream(e));
     }
     Ok(Streamed {

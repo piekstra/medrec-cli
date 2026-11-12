@@ -413,6 +413,16 @@ fn an_import_files_records_and_documents_and_is_idempotent() {
             .code(),
         Some(5)
     );
+    // A trailer that says the export was not complete: refused too.
+    let partial = changed.replace("\"complete\":true", "\"complete\":false");
+    assert_ne!(partial, changed);
+    let e4 = provider_env(&base, &partial);
+    assert_eq!(
+        e4.run(&["import", "--from", "fakeprov", "--patient", "pat-0001"])
+            .status
+            .code(),
+        Some(5)
+    );
     let auth = e2.run_env(
         &[
             "import",

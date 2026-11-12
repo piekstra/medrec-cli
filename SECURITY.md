@@ -57,9 +57,10 @@ opened copies). The records folder is not touched.
 
 ## Supply chain
 
-- Shared crates are pinned to tags: cli-common, medical-common. No FHIR,
-  SMART, DICOM or health-data library is used; the DICOM header reader and the
-  FHIR normalizer are this repo's own code.
+- Shared crates are pinned to tags: cli-common and medical-common, both the
+  family's own. No third-party FHIR, SMART, DICOM or health-data library is
+  used. The records stream comes from medical-common; the DICOM header reader
+  and the FHIR normalizer are this repo's own code.
 - CI runs `cargo audit`, `cargo deny` and `gitleaks` on every pull request,
   on GitHub-hosted Linux runners. `make install` builds with `--locked` from
   the reviewed `Cargo.lock`.

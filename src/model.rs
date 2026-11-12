@@ -396,7 +396,7 @@ pub struct ImportRun {
     pub imported_at: String,
     pub counts: BTreeMap<String, u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skipped: Vec<Value>,
+    pub skipped: Vec<pk_med_records::Skip>,
     pub records_added: usize,
     pub records_updated: usize,
     pub records_unchanged: usize,
@@ -451,62 +451,10 @@ pub struct ImagingSeries {
     pub instances: BTreeMap<String, String>,
 }
 
-/// Where a record came from (`provenance/v1` fields of pk-med-records).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Provenance {
-    pub source: ProvenanceSource,
-    /// `fhir-api`, `portal`, `scan`, `file`, `media`, `manual`, `huishouden`.
-    pub method: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_resource: Option<SourceResource>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fetched_at: Option<String>,
-    pub filed_at: String,
-    /// The raw file in the records folder: the verbatim resource, or the
-    /// document as received.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_path: Option<String>,
-    /// Who decided the person, date and type: `medrec` (its rules),
-    /// `organize-scans`, `hand` (on the command line or in review).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub classified_by: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub derived_from: Option<DerivedFrom>,
-    /// The medrec version that filed it.
-    pub filed_by: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProvenanceSource {
-    /// `fhir`, `portal`, `scan`, `drive`, `email`, `media`, `manual`,
-    /// `huishouden`.
-    pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cli: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cli_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub organization_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fhir_base: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SourceResource {
-    #[serde(rename = "type")]
-    pub resource_type: String,
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_updated: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DerivedFrom {
-    pub document_id: String,
-    pub rule_id: String,
-}
+/// Where a record came from: `provenance/v1`, medical-common's
+/// `pk-med-records` types.
+pub use pk_med_records::dto::DerivedFrom;
+pub use pk_med_records::{Provenance, ProvenanceSource, SourceResource};
 
 pub fn filed_by() -> String {
     format!("medrec {}", env!("CARGO_PKG_VERSION"))

@@ -1241,6 +1241,7 @@ dependencies = [
  "pk-cli-documents",
  "pk-cli-drive",
  "pk-cli-selfupdate",
+ "pk-med-records",
  "predicates",
  "rand 0.8.8",
  "regex",
@@ -1515,6 +1516,29 @@ dependencies = [
  "self-replace",
  "serde_json",
  "tar",
+]
+
+[[package]]
+name = "pk-med-fhir"
+version = "0.1.0"
+source = "git+https://github.com/piekstra/medical-common?tag=v0.1.0#7e1a66bdf26e869b46001a752393266c88c63fe9"
+dependencies = [
+ "base64 0.22.1",
+ "pk-cli-core",
+ "pk-cli-secrets",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pk-med-records"
+version = "0.1.0"
+source = "git+https://github.com/piekstra/medical-common?tag=v0.1.0#7e1a66bdf26e869b46001a752393266c88c63fe9"
+dependencies = [
+ "pk-cli-core",
+ "pk-med-fhir",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
