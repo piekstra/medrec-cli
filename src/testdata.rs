@@ -122,13 +122,19 @@ pub fn write_scans(scans: &Path) {
 /// Two copies of an ultrasound study (the second adds a series) and a
 /// zipped CT.
 pub fn write_dicom(dicom: &Path) {
-    let us = SyntheticStudy::new("US").seed(101).series(1).instances(3);
-    us.write_to(&dicom.join("cd1")).unwrap();
+    // Robin's (2020-02-02), like the household the flow tests set up.
+    let us = SyntheticStudy::new("US")
+        .seed(101)
+        .series(1)
+        .instances(3)
+        .patient_birth_date("20200202");
+    us.write_to(dicom.join("cd1")).unwrap();
     SyntheticStudy::new("US")
         .seed(101)
+        .patient_birth_date("20200202")
         .series(2)
         .instances(3)
-        .write_to(&dicom.join("cd2"))
+        .write_to(dicom.join("cd2"))
         .unwrap();
     let ct_dir = dicom.join("ct-src");
     SyntheticStudy::new("CT")

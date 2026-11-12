@@ -26,7 +26,10 @@ pk-cli-selfupdate = { git = "https://github.com/piekstra/cli-common", tag = "v0.
 pk-cli-auth = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" }
 pk-cli-documents = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" }
 pk-cli-drive = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" }
-pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.2.0" }
+pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.3.0" }
+# test-util: the synthetic study writer, which testdata.rs and the synth
+# example use in normal builds.
+pk-med-dicom = { git = "https://github.com/piekstra/medical-common", tag = "v0.3.0", features = ["test-util"] }
 sha2 = "0.10"
 md-5 = "0.10"
 base64 = "0.22"

@@ -52,7 +52,8 @@ pub struct IntakeReport {
     pub dicom_files: usize,
     /// Files that are not DICOM (a CD's viewer, a PDF report): not filed.
     pub other_files: usize,
-    /// DICOM files medrec could not read (a deflated or big-endian set).
+    /// DICOM files whose header does not read: damaged, cut short, or past
+    /// pk-med-dicom's header limits. Not filed.
     pub unreadable: usize,
     /// Files a DICOMDIR lists that are not on the media.
     #[serde(skip_serializing_if = "is_zero")]
@@ -1002,6 +1003,7 @@ mod tests {
         let p = household_with(&f, "2020-02-02");
         let cd1 = root.join("cd1");
         SyntheticStudy::new("US")
+            .patient_birth_date("20200202")
             .series(1)
             .instances(2)
             .seed(11)
@@ -1040,6 +1042,7 @@ mod tests {
         // A later disc of the same study with a second series.
         let cd2 = root.join("cd2");
         SyntheticStudy::new("US")
+            .patient_birth_date("20200202")
             .series(2)
             .instances(2)
             .seed(11)
@@ -1129,6 +1132,7 @@ mod tests {
 
         let cd = root.join("cd");
         SyntheticStudy::new("US")
+            .patient_birth_date("20200202")
             .series(1)
             .instances(2)
             .seed(11)
