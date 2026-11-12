@@ -55,17 +55,19 @@ quick-xml, lopdf), and so are local tools (poppler, tesseract, bsdtar).
 | `src/intake/` | Document intake: file types, text and OCR, detection with scores and evidence, duplicates |
 | `src/review.rs` | Filing what intake held back |
 | `src/import.rs`, `src/stream.rs`, `src/normalize.rs` | Provider import: the bounded subprocess, the `records-stream/v1` reader (medical-common's `pk-med-records`), FHIR to index records |
-| `src/dicom.rs`, `src/imaging.rs`, `src/view.rs` | DICOM header reading, study intake and export, private copies and viewers |
+| `src/dicom.rs`, `src/imaging.rs`, `src/view.rs` | DICOM headers (medical-common's `pk-med-dicom`, re-exported), study intake and export, private copies and viewers |
 | `src/views.rs`, `src/notes.rs`, `src/people.rs` | Timeline, search, record views, notes, people |
 | `src/maint.rs` | `init`, `doctor`, `verify`, `backup`, `cache clear` |
 | `src/testdata.rs` | The synthetic data generator (tests and `examples/synth.rs`) |
 
 The stream reader and the `provenance/v1` types are medical-common's
 `pk-med-records` (`src/stream.rs` and `src/model.rs` re-export them).
-`src/dicom.rs` mirrors the agreed `pk-med-dicom` API and is replaced by that
-crate once it is tagged on the same cli-common tag as medrec. Every
-`pk-cli-*` and `pk-med-*` crate must resolve to one cli-common tag, or two
-copies of `pk-cli-core` are built.
+DICOM headers, DICOMDIR and the synthetic study writer are its
+`pk-med-dicom` (`src/dicom.rs` re-exports it; feature `test-util` is on
+because `src/testdata.rs` is built in normal builds). Every `pk-med-*`
+crate is on one medical-common tag, and every `pk-cli-*` and `pk-med-*`
+crate must resolve to one cli-common tag, or two copies of `pk-cli-core`
+are built.
 
 ## Rules of the code
 

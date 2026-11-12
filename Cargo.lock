@@ -1241,6 +1241,7 @@ dependencies = [
  "pk-cli-documents",
  "pk-cli-drive",
  "pk-cli-selfupdate",
+ "pk-med-dicom",
  "pk-med-records",
  "predicates",
  "rand 0.8.8",
@@ -1519,9 +1520,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pk-med-dicom"
+version = "0.3.0"
+source = "git+https://github.com/piekstra/medical-common?tag=v0.3.0#77fc7cd7c55346499052139ad0d65c4cd12e85e1"
+dependencies = [
+ "flate2",
+ "pk-cli-core",
+]
+
+[[package]]
 name = "pk-med-fhir"
-version = "0.2.0"
-source = "git+https://github.com/piekstra/medical-common?tag=v0.2.0#10713394efd0aa1823df81c136bf6368770c9f7c"
+version = "0.3.0"
+source = "git+https://github.com/piekstra/medical-common?tag=v0.3.0#77fc7cd7c55346499052139ad0d65c4cd12e85e1"
 dependencies = [
  "base64 0.22.1",
  "pk-cli-core",
@@ -1532,8 +1542,8 @@ dependencies = [
 
 [[package]]
 name = "pk-med-records"
-version = "0.2.0"
-source = "git+https://github.com/piekstra/medical-common?tag=v0.2.0#10713394efd0aa1823df81c136bf6368770c9f7c"
+version = "0.3.0"
+source = "git+https://github.com/piekstra/medical-common?tag=v0.3.0#77fc7cd7c55346499052139ad0d65c4cd12e85e1"
 dependencies = [
  "pk-cli-core",
  "pk-med-fhir",
