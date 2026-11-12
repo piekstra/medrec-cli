@@ -114,6 +114,20 @@ fn no_color_and_completions_work() {
     }
 }
 
+/// Exit 2 from argument checking, with a message that says `says` and
+/// does not mention the records folder.
+fn refused(args: &[&str], says: &str) {
+    let out = medrec().args(args).output().unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(2), "{args:?}: {text}");
+    assert!(text.contains(says), "{args:?}: {text}");
+    assert!(!text.contains("records folder"), "{args:?}: {text}");
+}
+
 #[test]
 fn bad_arguments_exit_2_before_anything_is_read() {
     medrec().arg("no-such-command").assert().code(2);
@@ -134,27 +148,34 @@ fn bad_arguments_exit_2_before_anything_is_read() {
         .args(["timeline", "--since", "yesterday"])
         .assert()
         .code(2);
-    // A typo in a kind is an error, not an empty timeline.
-    medrec()
-        .args(["timeline", "--kind", "results"])
-        .assert()
-        .code(2);
-    for list in [
-        &["search", "x", "--limit", "0"][..],
+    // A typo in a kind is an error, not an empty timeline; a limit is 1 or
+    // more; --force means "do not ask" only, and the birth-date checks have
+    // their own flag. Each message names the argument, so none of these can
+    // pass on the missing records folder instead.
+    refused(
+        &["timeline", "--kind", "results"],
+        "invalid value 'results'",
+    );
+    refused(
+        &["search", "x", "--limit", "0"],
+        "invalid value '0' for '--limit <N>'",
+    );
+    refused(
         &["documents", "list", "--limit", "0"],
-        &["people", "list", "--limit", "-1"],
-    ] {
-        medrec().args(list).assert().code(2);
-    }
-    // --force means "do not ask" only; the birth-date check has its own flag.
-    medrec()
-        .args(["import", "--from", "x", "--patient", "p", "--force"])
-        .assert()
-        .code(2);
-    medrec()
-        .args(["images", "intake", "x", "--force"])
-        .assert()
-        .code(2);
+        "invalid value '0' for '--limit <N>'",
+    );
+    refused(
+        &["people", "list", "--limit=-1"],
+        "invalid value '-1' for '--limit <N>'",
+    );
+    refused(
+        &["import", "--from", "x", "--patient", "p", "--force"],
+        "unexpected argument '--force'",
+    );
+    refused(
+        &["images", "intake", "x", "--force"],
+        "unexpected argument '--force'",
+    );
     // Checked before the records folder is looked for: the message names
     // the argument, not the missing folder.
     let out = medrec()

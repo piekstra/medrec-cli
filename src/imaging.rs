@@ -904,28 +904,6 @@ pub struct Exported {
     pub bytes: u64,
 }
 
-/// Folders 0700 and files 0600 under `dir`.
-fn restrict_tree(dir: &Path) -> Result<(), CliError> {
-    use std::os::unix::fs::PermissionsExt;
-    let set = |p: &Path, mode: u32| {
-        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode))
-            .map_err(|e| CliError::Other(format!("restricting {}: {e}", p.display())))
-    };
-    set(dir, 0o700)?;
-    for e in std::fs::read_dir(dir)
-        .map_err(|e| CliError::Other(format!("reading {}: {e}", dir.display())))?
-        .flatten()
-    {
-        let ft = e.file_type().map_err(|e| CliError::Other(e.to_string()))?;
-        if ft.is_dir() {
-            restrict_tree(&e.path())?;
-        } else if ft.is_file() {
-            set(&e.path(), 0o600)?;
-        }
-    }
-    Ok(())
-}
-
 /// Copy a study's files (and its `study.json`) into `dir`, which must be
 /// new or empty, then check each file's MD5 against the store's.
 pub fn export(folder: &Folder, study: &ImagingStudy, dir: &Path) -> Result<Exported, CliError> {
@@ -945,7 +923,7 @@ pub fn export(folder: &Folder, study: &ImagingStudy, dir: &Path) -> Result<Expor
     }
     folder.store.fetch_tree(&study.path, dir)?;
     // Owner-only, whatever made the copy: the study is someone's record.
-    restrict_tree(dir)?;
+    store::restrict_tree(dir)?;
     let expected = folder.store.hashes(&study.path)?;
     let (mut files, mut bytes) = (0, 0);
     for h in &expected {

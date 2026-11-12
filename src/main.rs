@@ -367,7 +367,7 @@ struct SearchArgs {
     #[command(flatten)]
     range: RangeArgs,
     /// At most this many hits (1 or more).
-    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, value_name = "N", default_value_t = 50, value_parser = clap::value_parser!(u64).range(1..))]
     limit: u64,
 }
 

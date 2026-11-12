@@ -664,6 +664,15 @@ pub fn backup(folder: &Folder, to: &Location, budget: Duration) -> Result<Backup
             "the backup must go somewhere other than the records folder".into(),
         ));
     }
+    // A backup on a local disk is owner-only like the folder: the target is
+    // closed before anything is copied into it, and every folder and file
+    // in it is restricted once the copy is done.
+    if let Location::Dir(b) = to {
+        use std::os::unix::fs::PermissionsExt;
+        store::private_dirs(b)?;
+        std::fs::set_permissions(b, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| CliError::Other(format!("restricting {}: {e}", b.display())))?;
+    }
     match (&from, to) {
         (Location::Dir(a), Location::Dir(b)) => copy_dir(a, b)?,
         _ => {
@@ -689,6 +698,9 @@ pub fn backup(folder: &Folder, to: &Location, budget: Duration) -> Result<Backup
                 )));
             }
         }
+    }
+    if let Location::Dir(b) = to {
+        store::restrict_tree(b)?;
     }
     let target = Store::open(to, Reads::Fresh, budget);
     let theirs: HashMap<String, Option<String>> = target

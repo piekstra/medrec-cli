@@ -608,6 +608,34 @@ fn a_local_folder_is_owner_only_and_lists_take_a_limit() {
     let one = e.ok(&["people", "list", "--limit", "1"]);
     assert_eq!(one["items"].as_array().unwrap().len(), 1);
 
+    // A backup into a folder others can read ends owner-only, files it
+    // already held included.
+    let target = e.root.join("backup");
+    std::fs::create_dir_all(target.join("old")).unwrap();
+    std::fs::write(target.join("old/left.txt"), b"x").unwrap();
+    let set =
+        |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    set(&target, 0o755);
+    set(&target.join("old"), 0o755);
+    set(&target.join("old/left.txt"), 0o644);
+    let b = e.ok(&["backup", "--to", target.to_str().unwrap()]);
+    assert_eq!(b["files"], b["verified"]);
+    let mut open = Vec::new();
+    let mut stack = vec![target.clone()];
+    while let Some(d) = stack.pop() {
+        if mode(&d) != 0o700 {
+            open.push(d.clone());
+        }
+        for f in std::fs::read_dir(&d).unwrap().flatten() {
+            if f.file_type().unwrap().is_dir() {
+                stack.push(f.path());
+            } else if mode(&f.path()) != 0o600 {
+                open.push(f.path());
+            }
+        }
+    }
+    assert!(open.is_empty(), "not owner-only: {open:?}");
+
     let folder_mode = |e: &Env| -> String {
         let out = e.run(&["--json", "doctor"]);
         let v: Value = serde_json::from_slice(&out.stdout).expect("one JSON document");
@@ -622,5 +650,54 @@ fn a_local_folder_is_owner_only_and_lists_take_a_limit() {
     assert_eq!(folder_mode(&e), "ok");
     std::fs::set_permissions(e.records(), std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(folder_mode(&e), "warn");
+    let _ = std::fs::remove_dir_all(Path::new(&e.root));
+}
+
+#[test]
+fn the_birth_date_checks_have_their_own_flag() {
+    let base = Env::new("birth");
+    setup(&base);
+    let e = provider_env(&base, medrec::testdata::STREAM);
+    let stdout = |args: &[&str]| -> (Option<i32>, Value) {
+        let mut a = vec!["--json"];
+        a.extend_from_slice(args);
+        let out = e.run(&a);
+        (
+            out.status.code(),
+            serde_json::from_slice(&out.stdout).expect("one JSON document"),
+        )
+    };
+    // The synthetic source's patient is Robin's age, not Alex's.
+    let import = [
+        "import",
+        "--from",
+        "fakeprov",
+        "--patient",
+        "pat-0001",
+        "--person",
+        "Alex",
+    ];
+    let (code, v) = stdout(&import);
+    assert_eq!(code, Some(2));
+    assert!(v.to_string().contains("--allow-birth-date-mismatch"), "{v}");
+    let mut allowed = import.to_vec();
+    allowed.push("--allow-birth-date-mismatch");
+    assert_eq!(e.ok(&allowed)["records_added"], 9);
+
+    let dicom = e.root.join("dicom");
+    medrec::testdata::write_dicom(&dicom);
+    let cd1 = dicom.join("cd1").to_string_lossy().into_owned();
+    let (_, v) = stdout(&["images", "intake", &cd1, "--person", "Alex"]);
+    assert_eq!(v["studies"][0]["status"], "skipped");
+    let v = e.ok(&[
+        "images",
+        "intake",
+        &cd1,
+        "--person",
+        "Alex",
+        "--allow-birth-date-mismatch",
+        "--dry-run",
+    ]);
+    assert_eq!(v["studies"][0]["status"], "would_file");
     let _ = std::fs::remove_dir_all(Path::new(&e.root));
 }

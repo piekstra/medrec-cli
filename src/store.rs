@@ -525,6 +525,30 @@ pub fn copy_tree(from: &Path, to: &Path, existing: Existing) -> Result<(), CliEr
     Ok(())
 }
 
+/// `dir` and every folder under it 0700, every file 0600: for a copy made
+/// by something that sets its own modes (rclone uses the umask). Symlinks
+/// are left alone.
+pub fn restrict_tree(dir: &Path) -> Result<(), CliError> {
+    use std::os::unix::fs::PermissionsExt;
+    let set = |p: &Path, mode: u32| {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode))
+            .map_err(|e| CliError::Other(format!("restricting {}: {e}", p.display())))
+    };
+    set(dir, 0o700)?;
+    for e in std::fs::read_dir(dir)
+        .map_err(|e| CliError::Other(format!("reading {}: {e}", dir.display())))?
+        .flatten()
+    {
+        let ft = e.file_type().map_err(|e| CliError::Other(e.to_string()))?;
+        if ft.is_dir() {
+            restrict_tree(&e.path())?;
+        } else if ft.is_file() {
+            set(&e.path(), 0o600)?;
+        }
+    }
+    Ok(())
+}
+
 /// Create `dir` and any missing parents owner-only (0700). Directories that
 /// already exist keep their mode.
 pub fn private_dirs(dir: &Path) -> Result<(), CliError> {
