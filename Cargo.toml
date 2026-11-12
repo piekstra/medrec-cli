@@ -1,7 +1,7 @@
 [package]
 name = "medrec-cli"
 description = "A household's medical records in a plain Drive folder: people, intake of scans and files with local OCR, imaging studies, provider and insurer imports, timelines, search and notes."
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 # pk-cli-drive needs 1.89 (`File::lock`).
 rust-version = "1.89"
@@ -20,13 +20,13 @@ name = "medrec"
 path = "src/main.rs"
 
 [dependencies]
-pk-cli-core = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.0" }
-pk-cli-config = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.0" }
-pk-cli-selfupdate = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.0" }
-pk-cli-auth = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.0" }
-pk-cli-documents = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.0" }
-pk-cli-drive = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.0" }
-pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.1.0" }
+pk-cli-core = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" }
+pk-cli-config = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" }
+pk-cli-selfupdate = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" }
+pk-cli-auth = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" }
+pk-cli-documents = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" }
+pk-cli-drive = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" }
+pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.2.0" }
 sha2 = "0.10"
 md-5 = "0.10"
 base64 = "0.22"
