@@ -1,0 +1,140 @@
+name: release
+
+# Cut a release by pushing a tag like `v0.1.0`. One macOS job (Apple Silicon,
+# cross-compiling the Intel target) and one Linux job; medrec builds for no
+# other OS. Build jobs are independent (fail-fast: false); only `publish`,
+# which runs on a tag alone and runs no build code, can write to the
+# repository. It attaches whatever was built to a draft and publishes the
+# draft only once every expected asset is there, so `self-update` never finds
+# a half release.
+#
+# A pull request that changes how releases are built, or the dependencies
+# and version, runs every job but `publish` as a dry run.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    name: check versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Tag and Cargo.toml agree
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+  build:
+    name: build ${{ matrix.name }}
+    needs: versions
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            name: apple (aarch64 + x86_64)
+            targets: "aarch64-apple-darwin x86_64-apple-darwin"
+          - os: ubuntu-latest
+            name: linux x86_64
+            targets: "x86_64-unknown-linux-gnu"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      # Asset names are the contract `medrec self-update` resolves against:
+      # medrec-<target>.tar.gz plus a sibling .sha256.
+      - name: Build and package each target
+        run: |
+          set -euo pipefail
+          sha256() { if command -v shasum >/dev/null; then shasum -a 256 "$1"; else sha256sum "$1"; fi; }
+          for t in ${{ matrix.targets }}; do
+            rustup target add "$t"
+            cargo build --release --locked --target "$t"
+            tar -C "target/$t/release" -czf "medrec-$t.tar.gz" medrec
+            sha256 "medrec-$t.tar.gz" > "medrec-$t.tar.gz.sha256"
+          done
+      # A binary that builds and then fails at startup is not published.
+      # The x86_64 macOS slice cannot run on this arm64 runner.
+      - name: Run what this runner can run
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            macOS) b=target/aarch64-apple-darwin/release/medrec ;;
+            *) b=target/x86_64-unknown-linux-gnu/release/medrec ;;
+          esac
+          "$b" --version
+          "$b" info --json > /dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ runner.os }}
+          path: |
+            medrec-*.tar.gz
+            medrec-*.tar.gz.sha256
+          retention-days: 3
+          if-no-files-found: error
+
+  publish:
+    name: publish the release
+    needs: [versions, build]
+    if: ${{ !cancelled() && needs.versions.result == 'success' && startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          draft: true
+          files: |
+            dist/medrec-*.tar.gz
+            dist/medrec-*.tar.gz.sha256
+          generate_release_notes: true
+      - name: Every expected asset was attached
+        run: |
+          set -euo pipefail
+          missing=0
+          for t in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do
+            for f in "medrec-$t.tar.gz" "medrec-$t.tar.gz.sha256"; do
+              [ -f "dist/$f" ] || { echo "::error::missing $f"; missing=1; }
+            done
+          done
+          exit "$missing"
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A re-run of an older tag must not move Latest back to it.
+          current=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName 2>/dev/null || true)
+          newest=$(printf '%s\n%s\n' "$current" "$GITHUB_REF_NAME" | sort -V | tail -1)
+          latest=false; [ "$newest" = "$GITHUB_REF_NAME" ] && latest=true
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest="$latest"
