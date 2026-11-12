@@ -287,8 +287,13 @@ fn heic(tools: &Tools, path: &Path, opts: &Options) -> Extracted {
 }
 
 fn ocr(tesseract: &Path, image: &Path, opts: &Options) -> Result<String, String> {
+    // On macOS, leptonica (tesseract's image reader) rewrites a path that
+    // starts with `/tmp` to the per-user temporary directory, so a scan under
+    // /tmp reads as missing. The canonical path (/private/tmp/...) is not
+    // rewritten.
+    let image = std::fs::canonicalize(image).unwrap_or_else(|_| image.to_path_buf());
     let r = Bounded::new(tesseract)
-        .arg(image)
+        .arg(&image)
         .arg("stdout")
         .arg("-l")
         .arg(&opts.languages)
