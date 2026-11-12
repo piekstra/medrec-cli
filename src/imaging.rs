@@ -38,7 +38,7 @@ pub const STUDY_FILE: &str = "study.json";
 pub struct IntakeRequest {
     pub path: PathBuf,
     pub person: Option<String>,
-    pub force: bool,
+    pub allow_birth_date_mismatch: bool,
     pub dry_run: bool,
     pub interactive: bool,
 }
@@ -154,19 +154,19 @@ pub fn intake(folder: &Folder, req: &IntakeRequest) -> Result<IntakeReport, CliE
             instances,
         )?;
         if matches!(o.status.as_str(), "filed" | "added") {
-            if let Some(p) = &o.person {
-                touched.insert(p.clone());
+            if let Some(pid) = &o.person {
+                // Saved now, not after the last study: a failure on a later
+                // study leaves this one indexed.
+                let p = household
+                    .person(pid)
+                    .cloned()
+                    .ok_or_else(|| CliError::Other(format!("unknown person {pid}")))?;
+                let idx = indexes.get_mut(pid).expect("loaded above");
+                folder.save_index(&p, idx)?;
+                touched.insert(pid.clone());
             }
         }
         outcomes.push(o);
-    }
-    for pid in &touched {
-        let p = household
-            .person(pid)
-            .cloned()
-            .ok_or_else(|| CliError::Other(format!("unknown person {pid}")))?;
-        let idx = indexes.get_mut(pid).expect("loaded above");
-        folder.save_index(&p, idx)?;
     }
     if !touched.is_empty() {
         // The household's rev moves so another machine's stale view refuses.
@@ -255,10 +255,10 @@ fn file_study(
         ),
         (None, Some(g)) => {
             if let (Some(ours), Some(theirs)) = (&g.birth_date, &header_birth) {
-                if ours != theirs && !req.force {
+                if ours != theirs && !req.allow_birth_date_mismatch {
                     out.reason = Some(format!(
                         "the study's patient has a different birth date than {} in medrec; check --person \
-                         (or pass --force)",
+                         (or pass --allow-birth-date-mismatch)",
                         g.name
                     ));
                     return Ok(out);
@@ -317,7 +317,7 @@ fn file_study(
     let existing = idx.studies.iter().position(|s| s.study_uid == uid);
     let mut study = match existing {
         Some(i) => idx.studies[i].clone(),
-        None => new_study(idx, &person, uid, &instances, &mods),
+        None => new_study(folder, idx, &person, uid, &instances, &mods)?,
     };
     out.study = Some(study.id.clone());
     out.path = Some(study.path.clone());
@@ -395,12 +395,13 @@ fn file_study(
     let mut sums: Vec<(String, String)> = Vec::new();
     for (local, rel, _, _) in &staged {
         let to = staging.path().join(rel);
-        std::fs::create_dir_all(to.parent().expect("a series directory"))
-            .map_err(|e| CliError::Other(format!("staging: {e}")))?;
+        store::private_dirs(to.parent().expect("a series directory"))?;
         std::fs::copy(local, &to)
             .map_err(|e| CliError::Other(format!("copying {}: {e}", local.display())))?;
         sums.push((format!("{}/{rel}", study.path), store::md5_file(&to)?));
     }
+    // A stale view of the index must not file anything.
+    folder.index_unchanged(&person, idx)?;
     folder.store.put_tree(staging.path(), &study.path)?;
     let after: HashMap<String, Option<String>> = folder
         .store
@@ -415,6 +416,11 @@ fn file_study(
                 folder.store.display_path(rel)
             )));
         }
+    }
+    let prefix = format!("{}/", study.path);
+    for (rel, md5) in sums {
+        let within = rel.strip_prefix(&prefix).unwrap_or(&rel).to_string();
+        study.files.insert(within, md5);
     }
 
     study.instances = study.series.iter().map(|s| s.instances.len()).sum();
@@ -515,23 +521,26 @@ fn series_dir(series: &ImagingSeries, taken: &HashSet<String>) -> String {
 }
 
 fn new_study(
+    folder: &Folder,
     idx: &PersonIndex,
     person: &Person,
     uid: &str,
     instances: &[Instance],
     mods: &[String],
-) -> ImagingStudy {
+) -> Result<ImagingStudy, CliError> {
     let h = &instances[0].header;
     let date = h.study_date();
     let name = study_folder_name(date.as_deref(), mods, h.body_part(), h.institution());
+    // Taken in the index, or in the folder itself: another machine's study,
+    // or what a stopped run left, is never shared.
     let taken: HashSet<&str> = idx.studies.iter().map(|s| s.path.as_str()).collect();
     let mut path = folder::imaging_dir(person, &name);
     let mut n = 2;
-    while taken.contains(path.as_str()) {
+    while taken.contains(path.as_str()) || folder.store.exists(&path)? {
         path = folder::imaging_dir(person, &format!("{name}_{n}"));
         n += 1;
     }
-    ImagingStudy {
+    Ok(ImagingStudy {
         id: ids::new("m"),
         study_uid: uid.into(),
         path,
@@ -546,9 +555,10 @@ fn new_study(
         instances: 0,
         size: 0,
         report: None,
+        files: BTreeMap::new(),
         filed_at: now_rfc3339(),
         provenance: Vec::new(),
-    }
+    })
 }
 
 /// `2026-03-04_us_abdomen_example_imaging`.
@@ -894,6 +904,28 @@ pub struct Exported {
     pub bytes: u64,
 }
 
+/// Folders 0700 and files 0600 under `dir`.
+fn restrict_tree(dir: &Path) -> Result<(), CliError> {
+    use std::os::unix::fs::PermissionsExt;
+    let set = |p: &Path, mode: u32| {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode))
+            .map_err(|e| CliError::Other(format!("restricting {}: {e}", p.display())))
+    };
+    set(dir, 0o700)?;
+    for e in std::fs::read_dir(dir)
+        .map_err(|e| CliError::Other(format!("reading {}: {e}", dir.display())))?
+        .flatten()
+    {
+        let ft = e.file_type().map_err(|e| CliError::Other(e.to_string()))?;
+        if ft.is_dir() {
+            restrict_tree(&e.path())?;
+        } else if ft.is_file() {
+            set(&e.path(), 0o600)?;
+        }
+    }
+    Ok(())
+}
+
 /// Copy a study's files (and its `study.json`) into `dir`, which must be
 /// new or empty, then check each file's MD5 against the store's.
 pub fn export(folder: &Folder, study: &ImagingStudy, dir: &Path) -> Result<Exported, CliError> {
@@ -909,10 +941,11 @@ pub fn export(folder: &Folder, study: &ImagingStudy, dir: &Path) -> Result<Expor
             )));
         }
     } else {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| CliError::Other(format!("creating {}: {e}", dir.display())))?;
+        store::private_dirs(dir)?;
     }
     folder.store.fetch_tree(&study.path, dir)?;
+    // Owner-only, whatever made the copy: the study is someone's record.
+    restrict_tree(dir)?;
     let expected = folder.store.hashes(&study.path)?;
     let (mut files, mut bytes) = (0, 0);
     for h in &expected {
@@ -979,7 +1012,7 @@ mod tests {
         IntakeRequest {
             path: path.into(),
             person: None,
-            force: false,
+            allow_birth_date_mismatch: false,
             dry_run: false,
             interactive: false,
         }
@@ -1099,10 +1132,48 @@ mod tests {
             .unwrap()
             .contains("birth date"));
 
-        named.force = true;
+        named.allow_birth_date_mismatch = true;
         named.dry_run = true;
         assert_eq!(intake(&f, &named).unwrap().studies[0].status, "would_file");
         assert!(f.index(&p).unwrap().studies.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_leftover_study_folder_is_not_reused_and_verify_sees_changed_bytes() {
+        let (root, f) = new_folder("img-leftover");
+        let p = household_with(&f, "2020-02-02");
+        // What a run on another machine, or one that stopped, left behind.
+        let name = "Robin Testperson/Imaging/2026-03-04_us_abdomen_example_imaging";
+        let left = root.join("records").join(name).join("S001");
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::write(left.join("00001.dcm"), b"partial").unwrap();
+
+        let cd = root.join("cd");
+        SyntheticStudy::new("US")
+            .series(1)
+            .instances(2)
+            .seed(11)
+            .write_to(&cd)
+            .unwrap();
+        let r = intake(&f, &req(&cd)).unwrap();
+        assert_eq!(r.studies[0].status, "filed");
+        let path = format!("{name}_2");
+        assert_eq!(r.studies[0].path.as_deref(), Some(path.as_str()));
+        assert_eq!(std::fs::read(left.join("00001.dcm")).unwrap(), b"partial");
+
+        let idx = f.index(&p).unwrap();
+        assert_eq!(idx.studies[0].files.len(), 2);
+        assert!(crate::maint::verify(&f, false).unwrap().changed.is_empty());
+        let filed = root.join("records").join(&path).join("S001/00001.dcm");
+        let mut bytes = std::fs::read(&filed).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(&filed, bytes).unwrap();
+        assert_eq!(
+            crate::maint::verify(&f, false).unwrap().changed,
+            vec![format!("{path}/S001/00001.dcm")]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

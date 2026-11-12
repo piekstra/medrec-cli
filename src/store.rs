@@ -136,8 +136,12 @@ impl Store {
         self.backend.write_file(rel, content)
     }
 
-    /// Upload a local file (binary-safe), replacing any file at `rel`.
+    /// Upload a local file (binary-safe), replacing any file at `rel`. On a
+    /// local directory the file is owner-only (0600) in owner-only folders.
     pub fn put_file(&self, local: &Path, rel: &str) -> Result<(), CliError> {
+        if let Location::Dir(root) = &self.location {
+            return private_copy(local, &root.join(rel), Existing::Replace);
+        }
         self.backend.put_file(local, rel)
     }
 
@@ -364,13 +368,16 @@ impl Store {
     }
 
     /// Copy a local directory's contents under `rel` (one rclone call).
+    /// Never replaces a file: one already there with the same bytes is left
+    /// as it is, and one with other bytes fails the copy (`--immutable`), so
+    /// a filed file cannot be overwritten by a later upload.
     pub fn put_tree(&self, local: &Path, rel: &str) -> Result<(), CliError> {
         match &self.location {
-            Location::Dir(root) => copy_tree(local, &root.join(rel)),
+            Location::Dir(root) => copy_tree(local, &root.join(rel), Existing::Keep),
             Location::Remote(spec) => {
                 let src = local.to_string_lossy().into_owned();
                 let dst = Self::spec_of(spec, rel);
-                self.rclone_ok("copy", &["copy", src.as_str(), dst.as_str()])
+                self.rclone_ok("copy", &["copy", "--immutable", src.as_str(), dst.as_str()])
                     .map(|_| ())
             }
         }
@@ -379,7 +386,7 @@ impl Store {
     /// Copy everything under `rel` into a local directory.
     pub fn fetch_tree(&self, rel: &str, local: &Path) -> Result<(), CliError> {
         match &self.location {
-            Location::Dir(root) => copy_tree(&root.join(rel), local),
+            Location::Dir(root) => copy_tree(&root.join(rel), local, Existing::Replace),
             Location::Remote(spec) => {
                 let src = Self::spec_of(spec, rel);
                 let dst = local.to_string_lossy().into_owned();
@@ -495,21 +502,97 @@ fn walk(dir: &Path, f: &mut dyn FnMut(&Path)) -> Result<(), CliError> {
     Ok(())
 }
 
-fn copy_tree(from: &Path, to: &Path) -> Result<(), CliError> {
+/// What a copy does with a file already at its destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Existing {
+    /// Replace it, atomically.
+    Replace,
+    /// Keep it: the same bytes are fine, other bytes are an error.
+    Keep,
+}
+
+pub fn copy_tree(from: &Path, to: &Path, existing: Existing) -> Result<(), CliError> {
     if from.is_file() {
-        create_parent(to)?;
-        std::fs::copy(from, to)
-            .map_err(|e| CliError::Other(format!("copying {}: {e}", from.display())))?;
-        return Ok(());
+        return private_copy(from, to, existing);
     }
     let mut files = Vec::new();
     walk(from, &mut |p| files.push(p.to_path_buf()))?;
+    private_dirs(to)?;
     for p in files {
         let rel = p.strip_prefix(from).unwrap_or(&p);
-        let dst = to.join(rel);
-        create_parent(&dst)?;
-        std::fs::copy(&p, &dst)
-            .map_err(|e| CliError::Other(format!("copying {}: {e}", p.display())))?;
+        private_copy(&p, &to.join(rel), existing)?;
+    }
+    Ok(())
+}
+
+/// Create `dir` and any missing parents owner-only (0700). Directories that
+/// already exist keep their mode.
+pub fn private_dirs(dir: &Path) -> Result<(), CliError> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|e| CliError::Other(format!("creating {}: {e}", dir.display())))
+}
+
+/// Copy `from` to `to` as an owner-only file (0600) in owner-only folders.
+/// Records are the most sensitive data a household has; a copy never takes
+/// the mode of the file it came from.
+pub fn private_copy(from: &Path, to: &Path, existing: Existing) -> Result<(), CliError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let fail = |e: std::io::Error| {
+        CliError::Other(format!(
+            "copying {} to {}: {e}",
+            from.display(),
+            to.display()
+        ))
+    };
+    if let Some(parent) = to.parent() {
+        private_dirs(parent)?;
+    }
+    if existing == Existing::Keep && to.symlink_metadata().is_ok() {
+        if to.is_file() && md5_file(to)? == md5_file(from)? {
+            return Ok(());
+        }
+        return Err(CliError::Upstream(format!(
+            "refusing to overwrite {}: a different file is already there; nothing was replaced",
+            to.display()
+        )));
+    }
+    let mut src = std::fs::File::open(from).map_err(fail)?;
+    // Keep: create the destination itself, so a file that appeared since
+    // the check above is never replaced. Replace: a temporary file beside
+    // it, renamed over it once complete.
+    let write_to = match existing {
+        Existing::Keep => to.to_path_buf(),
+        Existing::Replace => {
+            let name = to
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            to.with_file_name(format!(".{name}.medrec-{}", std::process::id()))
+        }
+    };
+    let mut dst = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&write_to)
+        .map_err(fail)?;
+    let copied = std::io::copy(&mut src, &mut dst)
+        .and_then(|_| dst.flush())
+        .and_then(|_| dst.sync_all());
+    if let Err(e) = copied {
+        let _ = std::fs::remove_file(&write_to);
+        return Err(fail(e));
+    }
+    if existing == Existing::Replace {
+        if let Err(e) = std::fs::rename(&write_to, to) {
+            let _ = std::fs::remove_file(&write_to);
+            return Err(fail(e));
+        }
     }
     Ok(())
 }
@@ -538,11 +621,10 @@ pub fn statvfs_space(path: &Path) -> Space {
 }
 
 fn create_parent(path: &Path) -> Result<(), CliError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| CliError::Other(format!("creating {}: {e}", parent.display())))?;
+    match path.parent() {
+        Some(parent) => private_dirs(parent),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -558,6 +640,53 @@ mod tests {
         assert!(matches!(Location::parse("/tmp/records"), Location::Dir(_)));
         assert!(matches!(Location::parse("./a:b"), Location::Dir(_)));
         assert!(matches!(Location::parse("C:\\x"), Location::Dir(_)));
+    }
+
+    fn mode(p: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn local_copies_are_owner_only_and_keep_never_replaces() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::testutil::temp_dir("store-private");
+        let one = root.join("one.bin");
+        let two = root.join("two.bin");
+        std::fs::write(&one, b"one").unwrap();
+        std::fs::write(&two, b"two").unwrap();
+        std::fs::set_permissions(&one, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let dst = root.join("out/a/b.bin");
+        private_copy(&one, &dst, Existing::Keep).unwrap();
+        assert_eq!(
+            (
+                mode(&dst),
+                mode(&root.join("out")),
+                mode(&root.join("out/a"))
+            ),
+            (0o600, 0o700, 0o700)
+        );
+        // The same bytes again are fine; other bytes are refused and the
+        // filed copy stays as it was.
+        private_copy(&one, &dst, Existing::Keep).unwrap();
+        assert!(matches!(
+            private_copy(&two, &dst, Existing::Keep),
+            Err(CliError::Upstream(_))
+        ));
+        assert_eq!(std::fs::read(&dst).unwrap(), b"one");
+
+        private_copy(&two, &dst, Existing::Replace).unwrap();
+        assert_eq!(
+            (std::fs::read(&dst).unwrap(), mode(&dst)),
+            (b"two".to_vec(), 0o600)
+        );
+        assert_eq!(
+            std::fs::read_dir(root.join("out/a")).unwrap().count(),
+            1,
+            "no temporary left"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -595,6 +724,12 @@ mod tests {
         std::fs::write(local.join("s/x.dcm"), b"x").unwrap();
         store.put_tree(&local, "q").unwrap();
         assert!(store.exists("q/s/x.dcm").unwrap());
+        assert_eq!(mode(&root.join("q/s/x.dcm")), 0o600);
+        // An upload never replaces a filed file.
+        store.put_tree(&local, "q").unwrap();
+        std::fs::write(local.join("s/x.dcm"), b"y").unwrap();
+        assert!(store.put_tree(&local, "q").is_err());
+        assert_eq!(store.read_text("q/s/x.dcm").unwrap().as_deref(), Some("x"));
         store.write_text("p/b.txt", "b").unwrap();
         assert!(store.move_no_clobber("p/a.txt", "p/b.txt").is_err());
         assert!(store.space().unwrap().free.is_some());

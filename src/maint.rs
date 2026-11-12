@@ -31,7 +31,7 @@ pub struct Init {
 pub fn init(
     cfg: &mut Config,
     location: &Location,
-    force: bool,
+    allow_other_files: bool,
     budget: Duration,
 ) -> Result<Init, CliError> {
     let st = Store::open(location, Reads::Fresh, budget);
@@ -50,10 +50,10 @@ pub fn init(
                 Err(e) => return Err(e),
             };
             let foreign: Vec<_> = entries.iter().filter(|e| !e.rel.starts_with('.')).collect();
-            if !foreign.is_empty() && !force {
+            if !foreign.is_empty() && !allow_other_files {
                 return Err(CliError::Usage(format!(
                     "{} already holds {} files that are not a medrec records folder; name an empty \
-                     folder, or pass --force to set up medrec beside them",
+                     folder, or pass --allow-other-files to set up medrec beside them",
                     location.display(),
                     foreign.len()
                 )));
@@ -297,6 +297,9 @@ fn folder_checks(cfg: &Config, loc: &Location, have_rclone: bool, out: &mut Vec<
         )),
         Err(e) => out.push(check("folder", "fail", e.to_string())),
     }
+    if let Location::Dir(root) = loc {
+        out.push(local_mode_check("folder mode", root));
+    }
     match folder.store.read_text(folder::README) {
         Ok(Some(t)) if t.starts_with(folder::README_MARK) => {}
         _ => out.push(check(
@@ -451,6 +454,55 @@ fn viewer_check(cfg: &Config) -> Check {
     }
 }
 
+/// A records folder on a local disk must be owner-only: its folder names
+/// are people's names, and its files their records.
+fn local_mode_check(name: &str, root: &Path) -> Check {
+    use std::os::unix::fs::PermissionsExt;
+    let mut open = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(m) = std::fs::symlink_metadata(&dir) else {
+            continue;
+        };
+        if m.permissions().mode() & 0o077 != 0 {
+            open.push(dir.clone());
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(e.path());
+            } else if ft.is_file() {
+                let mode = e.metadata().map(|m| m.permissions().mode()).unwrap_or(0);
+                if mode & 0o077 != 0 {
+                    open.push(e.path());
+                }
+            }
+        }
+    }
+    if open.is_empty() {
+        check(
+            name,
+            "ok",
+            format!("{} and everything in it is owner-only", root.display()),
+        )
+    } else {
+        check(
+            name,
+            "warn",
+            format!(
+                "{} folders or files under {} can be read by other users of this machine; \
+                 run `chmod -R go-rwx {}`",
+                open.len(),
+                root.display(),
+                root.display()
+            ),
+        )
+    }
+}
+
 fn cache_check() -> Check {
     use std::os::unix::fs::PermissionsExt;
     let Some(base) = pk_cli_drive::cache::cache_base(store::BIN) else {
@@ -541,10 +593,10 @@ pub fn verify(folder: &Folder, deep: bool) -> Result<Verify, CliError> {
                 for f in series.instances.values() {
                     v.study_files += 1;
                     let rel = format!("{}/{f}", s.path);
-                    if listing.contains_key(&rel) {
-                        v.ok += 1;
-                    } else {
-                        v.missing.push(rel.clone());
+                    match (listing.get(&rel), s.files.get(f)) {
+                        (None, _) => v.missing.push(rel.clone()),
+                        (Some(Some(got)), Some(want)) if got != want => v.changed.push(rel.clone()),
+                        _ => v.ok += 1,
                     }
                     named.insert(rel);
                 }
@@ -663,23 +715,10 @@ pub fn backup(folder: &Folder, to: &Location, budget: Duration) -> Result<Backup
     Ok(b)
 }
 
+/// A backup to a local directory: owner-only folders and files, and a
+/// file the backup already holds is replaced by the folder's current copy.
 fn copy_dir(from: &Path, to: &Path) -> Result<(), CliError> {
-    std::fs::create_dir_all(to)
-        .map_err(|e| CliError::Other(format!("creating {}: {e}", to.display())))?;
-    for e in std::fs::read_dir(from)
-        .map_err(|e| CliError::Other(format!("reading {}: {e}", from.display())))?
-    {
-        let e = e.map_err(|e| CliError::Other(e.to_string()))?;
-        let ft = e.file_type().map_err(|e| CliError::Other(e.to_string()))?;
-        let dst = to.join(e.file_name());
-        if ft.is_dir() {
-            copy_dir(&e.path(), &dst)?;
-        } else if ft.is_file() {
-            std::fs::copy(e.path(), &dst)
-                .map_err(|err| CliError::Other(format!("copying {}: {err}", e.path().display())))?;
-        }
-    }
-    Ok(())
+    store::copy_tree(from, to, store::Existing::Replace)
 }
 
 /// What `cache clear` removed.

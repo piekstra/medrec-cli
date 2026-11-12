@@ -41,7 +41,7 @@ medrec doctor                                   # FileVault, rclone, free space,
 ```
 
 `init` adopts an existing medrec folder, and refuses a folder that holds
-other files unless given `--force`. The folder's layout and every file format
+other files unless given `--allow-other-files`. The folder's layout and every file format
 are in [docs/data-contract.md](docs/data-contract.md).
 
 ## Use
@@ -70,9 +70,29 @@ medrec verify                                   # every indexed file against the
 medrec backup --to "/Volumes/Backup/Medical Records"
 ```
 
-Every command takes `--json` (one document on stdout) and `--help`. Exit
-codes: 0 ok, 1 a check failed, 2 usage, 3 a provider needs a sign-in, 4 not
-found, 5 upstream, 6 confirmation required.
+Every command takes `--json` (one document on stdout) and `--help`. Every
+list (`timeline`, the record views, `documents list`, `note list`,
+`images list`, `review list`, `people list`) takes `--limit N`; it is whole
+by default, and `search` stops at 50 hits. Exit codes: 0 ok, 1 a check
+failed, 2 usage, 3 a provider needs a sign-in, 4 not found, 5 upstream, 6
+confirmation required.
+
+### Settings
+
+`medrec config set <key> <value>`, kept in `~/.config/medrec/config.json`:
+
+| Key | What it sets | Default |
+|---|---|---|
+| `folder` | the records folder, `<remote>:<path>` or a local directory | set by `init` |
+| `mount` | where Drive for desktop mounts the folder, for `doctor` to compare | none |
+| `inbox` | the inbox `--inbox` drains | `inbox/` in the folder |
+| `me` | the person id who writes notes on this machine | none |
+| `viewer` | the DICOM viewer, or `none` | Weasis |
+| `ocr_languages`, `ocr_max_pages` | tesseract languages, and pages read per document | `eng`, 20 |
+| `max_file_mb` | the largest file intake or import keeps, MiB | 200 |
+| `import_max_mb` | the largest records stream one import reads, MiB; an import holds it until the trailer | 4096 |
+| `import_timeout_secs`, `rclone_budget_secs` | how long one provider export, and all of one command's rclone calls, may take | 1800, 1800 |
+| `providers` | provider CLIs to consider besides the known ones | none |
 
 ### What intake copies and what it moves
 

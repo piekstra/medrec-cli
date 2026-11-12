@@ -146,7 +146,7 @@ pub struct Request {
     pub person: Option<String>,
     pub since: Option<String>,
     pub org: Option<String>,
-    pub force: bool,
+    pub allow_birth_date_mismatch: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -177,6 +177,9 @@ struct Tee<R: Read> {
     inner: R,
     hasher: Sha256,
     bytes: u64,
+    /// `import_max_mb`: a stream past this is refused, since an import
+    /// holds every resource until the trailer.
+    max: u64,
 }
 
 impl<R: Read> Read for Tee<R> {
@@ -184,6 +187,13 @@ impl<R: Read> Read for Tee<R> {
         let n = self.inner.read(buf)?;
         self.hasher.update(&buf[..n]);
         self.bytes += n as u64;
+        if self.bytes > self.max {
+            return Err(std::io::Error::other(format!(
+                "the stream is larger than import_max_mb ({} MiB); raise it with \
+                 `medrec config set import_max_mb <MiB>` or import with --since",
+                self.max / (1024 * 1024)
+            )));
+        }
         Ok(n)
     }
 }
@@ -245,7 +255,11 @@ pub fn run(
         inner: child.stdout(),
         hasher: Sha256::new(),
         bytes: 0,
+        max: cfg.import_max_bytes(),
     };
+    // Lines stay within records-stream/v1's 64 MiB: a provider skips a
+    // larger resource as too_large, so a Binary over about 48 MiB never
+    // arrives, whatever max_file_mb says.
     let mut reader = RecordsReader::new(BufReader::with_capacity(256 * 1024, &mut tee));
     let read = read_stream(&mut reader, max_binary);
     let streamed = match read {
@@ -284,10 +298,10 @@ pub fn run(
                 .map(str::to_string)
         });
     if let (Some(ours), Some(theirs)) = (&person.birth_date, &source_birth) {
-        if ours != theirs && !req.force {
+        if ours != theirs && !req.allow_birth_date_mismatch {
             return Err(CliError::Usage(format!(
                 "the source's patient has a different birth date than {} in medrec; check --person \
-                 (or pass --force to import anyway). Nothing was written.",
+                 (or pass --allow-birth-date-mismatch to import anyway). Nothing was written.",
                 person.name
             )));
         }
@@ -295,9 +309,12 @@ pub fn run(
 
     let source = source_slug(&header.source.cli, &header.organization.id);
     let source_dir = folder::records_dir(&person, &source);
+    // The provider may have run for many minutes: a household another
+    // machine changed since stops the import before anything is uploaded.
+    folder.household_unchanged(&household)?;
+    let mut index = folder.index(&person)?;
     let written = write_raw(folder, &source_dir, &resources)?;
 
-    let mut index = folder.index(&person)?;
     let mut texts = folder.text(&person)?;
     let imported_at = now_rfc3339();
     let portal = header.method.as_deref() == Some("portal");
@@ -463,19 +480,23 @@ fn read_stream<R: std::io::BufRead>(
                         .bytes()
                         .filter(|b| !b.is_ascii_whitespace())
                         .collect();
+                    // Its size from the base64 length, before decoding: a
+                    // Binary over max_file_mb is neither decoded nor kept.
+                    if (data.len() as u64 / 4) * 3 > max_binary {
+                        skipped.push(Skip::resource(
+                            "Binary",
+                            raw.id.clone(),
+                            pk_med_records::stream::skip::TOO_LARGE,
+                            "larger than config max_file_mb; not kept",
+                        ));
+                        continue;
+                    }
                     let bytes = base64::engine::general_purpose::STANDARD
                         .decode(data)
                         .map_err(|_| {
                             ReadFailure::Other(format!("Binary {} carries no valid base64", raw.id))
                         })?;
-                    if bytes.len() as u64 > max_binary {
-                        skipped.push(Skip::resource(
-                            "Binary",
-                            raw.id.clone(),
-                            pk_med_records::stream::skip::TOO_LARGE,
-                            "larger than config max_file_mb",
-                        ));
-                    } else if !bytes.is_empty() {
+                    if !bytes.is_empty() {
                         binaries.push(Binary {
                             id: raw.id.clone(),
                             content_type: v
@@ -506,6 +527,7 @@ fn read_stream<R: std::io::BufRead>(
     })
 }
 
+#[derive(Debug)]
 enum ReadFailure {
     Stream(stream::StreamError),
     Other(String),
@@ -581,21 +603,39 @@ fn write_raw(
                 continue;
             }
             Some(old) => {
+                // The current version moves aside before the new one is
+                // uploaded (uploads never replace a file). When that version
+                // is already kept, from an earlier change back and forth,
+                // the copy at `rel` goes: its bytes are in the kept file.
                 let tag = old
                     .as_deref()
-                    .map(|m| m[..8].to_string())
-                    .unwrap_or_else(|| "prev".into());
-                let kept = format!("{source_dir}/{sub}~{tag}.json");
-                if !existing.contains_key(&kept) {
-                    folder.store.move_no_clobber(&rel, &kept)?;
+                    .and_then(|m| m.get(..8))
+                    .unwrap_or("prev")
+                    .to_string();
+                let mut kept = format!("{source_dir}/{sub}~{tag}.json");
+                let mut n = 2;
+                loop {
+                    match existing.get(&kept) {
+                        None => {
+                            folder.store.move_no_clobber(&rel, &kept)?;
+                            break;
+                        }
+                        Some(k) if old.is_some() && k == old => {
+                            folder.store.delete(&rel)?;
+                            break;
+                        }
+                        Some(_) => {
+                            kept = format!("{source_dir}/{sub}~{tag}-{n}.json");
+                            n += 1;
+                        }
+                    }
                 }
             }
             None => {}
         }
         let local = staging.path().join(format!("{sub}.json"));
         if let Some(parent) = local.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| CliError::Other(format!("staging: {e}")))?;
+            crate::store::private_dirs(parent)?;
         }
         crate::write_private(&local, body.as_bytes())?;
         staged.push((rel, md5));
@@ -1015,6 +1055,43 @@ fn record_source(h: &mut Household, pid: &str, cli: &str, header: &Header, porta
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_binary_over_max_file_mb_is_skipped_and_not_kept() {
+        let mut r = RecordsReader::new(crate::testdata::STREAM.as_bytes());
+        let all = read_stream(&mut r, u64::MAX).unwrap();
+        let binaries = all
+            .resources
+            .iter()
+            .filter(|x| x.resource_type == "Binary")
+            .count();
+        assert!(binaries > 0);
+
+        let mut r = RecordsReader::new(crate::testdata::STREAM.as_bytes());
+        let s = read_stream(&mut r, 1).unwrap();
+        assert!(s.binaries.is_empty());
+        assert!(!s.resources.iter().any(|x| x.resource_type == "Binary"));
+        let too_large = s
+            .skipped
+            .iter()
+            .filter(|k| k.code == pk_med_records::stream::skip::TOO_LARGE)
+            .count();
+        assert_eq!(too_large, binaries);
+    }
+
+    #[test]
+    fn a_stream_past_import_max_mb_is_refused() {
+        let data = [b'x'; 64];
+        let mut t = Tee {
+            inner: &data[..],
+            hasher: Sha256::new(),
+            bytes: 0,
+            max: 32,
+        };
+        let mut out = Vec::new();
+        let e = std::io::Read::read_to_end(&mut t, &mut out).unwrap_err();
+        assert!(e.to_string().contains("import_max_mb"));
+    }
 
     #[test]
     fn ids_and_sources_become_safe_names() {

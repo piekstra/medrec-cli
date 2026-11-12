@@ -109,7 +109,7 @@ fn init_refuses_a_folder_holding_other_files() {
     std::fs::write(d.join("taxes.pdf"), b"%PDF-1.4").unwrap();
     assert_eq!(e.run(&["init", d.to_str().unwrap()]).status.code(), Some(2));
     assert!(e
-        .run(&["init", d.to_str().unwrap(), "--force"])
+        .run(&["init", d.to_str().unwrap(), "--allow-other-files"])
         .status
         .success());
     let _ = std::fs::remove_dir_all(&e.root);
@@ -589,5 +589,38 @@ fn an_import_files_records_and_documents_and_is_idempotent() {
     let shown = e.ok(&["people", "show", "Robin"]);
     assert_eq!(shown["documents"], 2);
     assert_eq!(shown["sources"].as_array().unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(Path::new(&e.root));
+}
+
+#[test]
+fn a_local_folder_is_owner_only_and_lists_take_a_limit() {
+    use std::os::unix::fs::PermissionsExt;
+    let e = Env::new("modes");
+    setup(&e);
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&e.records()), 0o700);
+    assert_eq!(mode(&e.records().join("household.json")), 0o600);
+
+    assert_eq!(
+        e.ok(&["people", "list"])["items"].as_array().unwrap().len(),
+        2
+    );
+    let one = e.ok(&["people", "list", "--limit", "1"]);
+    assert_eq!(one["items"].as_array().unwrap().len(), 1);
+
+    let folder_mode = |e: &Env| -> String {
+        let out = e.run(&["--json", "doctor"]);
+        let v: Value = serde_json::from_slice(&out.stdout).expect("one JSON document");
+        v["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["check"] == "folder mode")
+            .map(|c| c["status"].as_str().unwrap().to_string())
+            .expect("a folder mode check")
+    };
+    assert_eq!(folder_mode(&e), "ok");
+    std::fs::set_permissions(e.records(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(folder_mode(&e), "warn");
     let _ = std::fs::remove_dir_all(Path::new(&e.root));
 }

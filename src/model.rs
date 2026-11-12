@@ -433,6 +433,10 @@ pub struct ImagingStudy {
     /// The radiology report: a document or record id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<String>,
+    /// Each filed file's MD5, by its path in the study folder, so `verify`
+    /// sees a file whose bytes changed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub files: BTreeMap<String, String>,
     pub filed_at: String,
     pub provenance: Vec<Provenance>,
 }

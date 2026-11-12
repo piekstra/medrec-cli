@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::store::Location;
 
 pub const KEYS: &str = "folder, mount, inbox, me, viewer, ocr_languages, ocr_max_pages, \
-                        max_file_mb, providers, import_timeout_secs, rclone_budget_secs";
+                        max_file_mb, providers, import_timeout_secs, import_max_mb, rclone_budget_secs";
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -47,6 +47,10 @@ pub struct Config {
     /// How long one provider export may run (default 1800 s).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub import_timeout_secs: Option<u64>,
+    /// Largest records stream one import reads, MiB (default 4096). An
+    /// import holds the stream until its trailer, so this bounds memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_max_mb: Option<u64>,
     /// How long all of one command's rclone calls may take (default 1800 s).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rclone_budget_secs: Option<u64>,
@@ -91,6 +95,10 @@ impl Config {
 
     pub fn max_file_bytes(&self) -> u64 {
         self.max_file_mb.unwrap_or(200).clamp(1, 4096) * 1024 * 1024
+    }
+
+    pub fn import_max_bytes(&self) -> u64 {
+        self.import_max_mb.unwrap_or(4096).clamp(16, 65_536) * 1024 * 1024
     }
 
     pub fn import_timeout(&self) -> std::time::Duration {
@@ -146,6 +154,7 @@ impl Config {
             "max_file_mb" => self.max_file_mb = Some(num(value)?),
             "providers" => self.providers = Some(value.into()),
             "import_timeout_secs" => self.import_timeout_secs = Some(num(value)?),
+            "import_max_mb" => self.import_max_mb = Some(num(value)?),
             "rclone_budget_secs" => self.rclone_budget_secs = Some(num(value)?),
             other => {
                 return Err(CliError::Usage(format!(
@@ -168,6 +177,7 @@ impl Config {
             "max_file_mb" => self.max_file_mb = None,
             "providers" => self.providers = None,
             "import_timeout_secs" => self.import_timeout_secs = None,
+            "import_max_mb" => self.import_max_mb = None,
             "rclone_budget_secs" => self.rclone_budget_secs = None,
             other => {
                 return Err(CliError::Usage(format!(

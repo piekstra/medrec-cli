@@ -134,6 +134,27 @@ fn bad_arguments_exit_2_before_anything_is_read() {
         .args(["timeline", "--since", "yesterday"])
         .assert()
         .code(2);
+    // A typo in a kind is an error, not an empty timeline.
+    medrec()
+        .args(["timeline", "--kind", "results"])
+        .assert()
+        .code(2);
+    for list in [
+        &["search", "x", "--limit", "0"][..],
+        &["documents", "list", "--limit", "0"],
+        &["people", "list", "--limit", "-1"],
+    ] {
+        medrec().args(list).assert().code(2);
+    }
+    // --force means "do not ask" only; the birth-date check has its own flag.
+    medrec()
+        .args(["import", "--from", "x", "--patient", "p", "--force"])
+        .assert()
+        .code(2);
+    medrec()
+        .args(["images", "intake", "x", "--force"])
+        .assert()
+        .code(2);
     // Checked before the records folder is looked for: the message names
     // the argument, not the missing folder.
     let out = medrec()

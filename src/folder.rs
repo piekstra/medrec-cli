@@ -110,6 +110,16 @@ impl Folder {
         Ok(h)
     }
 
+    /// Refuse when another machine wrote the household since `h` was read.
+    pub fn household_unchanged(&self, h: &Household) -> Result<(), CliError> {
+        if let Some(current) = read_household(&self.store)? {
+            if current.rev != h.rev {
+                return Err(changed_elsewhere(HOUSEHOLD));
+            }
+        }
+        Ok(())
+    }
+
     /// Write the household, refusing when another machine wrote it since
     /// this command read it.
     pub fn save_household(&self, h: &mut Household) -> Result<(), CliError> {
@@ -132,6 +142,17 @@ impl Folder {
             return Err(CliError::Other(format!("{rel} names another person")));
         }
         Ok(idx)
+    }
+
+    /// Refuse when another machine wrote `p`'s index since `idx` was read.
+    /// Checked before an upload, so a stale view does not file anything.
+    pub fn index_unchanged(&self, p: &Person, idx: &PersonIndex) -> Result<(), CliError> {
+        let rel = index_rel(p);
+        let current: Option<PersonIndex> = self.read_json(&rel)?;
+        if current.map(|c| c.rev).unwrap_or(0) != idx.rev {
+            return Err(changed_elsewhere(&rel));
+        }
+        Ok(())
     }
 
     pub fn save_index(&self, p: &Person, idx: &mut PersonIndex) -> Result<(), CliError> {
@@ -189,6 +210,11 @@ impl Folder {
     /// Upload a local file to a free name at `dir/name` (appending `_2`, `_3`
     /// when taken), then check the store holds the same MD5. Returns the
     /// path it was filed at.
+    ///
+    /// A name that already holds these bytes is taken as this file: a run
+    /// that stopped after its upload and before its index was saved left
+    /// it there, and the run after adopts it instead of filing a second
+    /// copy.
     pub fn put_new_file(
         &self,
         local: &Path,
@@ -196,10 +222,25 @@ impl Folder {
         name: &str,
         md5: &str,
     ) -> Result<String, CliError> {
-        let rel = self.free_name(dir, name)?;
-        self.store.put_file(local, &rel)?;
-        self.check_md5(&rel, md5)?;
-        Ok(rel)
+        let (stem, ext) = split_ext(name);
+        for n in 1..1000 {
+            let rel = if n == 1 {
+                format!("{dir}/{name}")
+            } else {
+                format!("{dir}/{stem}_{n}{ext}")
+            };
+            match self.store.md5(&rel)? {
+                Some(m) if m == md5 => return Ok(rel),
+                Some(_) => continue,
+                None if self.store.exists(&rel)? => continue,
+                None => {
+                    self.store.put_file(local, &rel)?;
+                    self.check_md5(&rel, md5)?;
+                    return Ok(rel);
+                }
+            }
+        }
+        Err(CliError::Other(format!("no free name for {name} in {dir}")))
     }
 
     /// Move a file already in the store to a free name at `dir/name`, then
@@ -546,14 +587,45 @@ impl FolderLock {
 
 fn changed_elsewhere(rel: &str) -> CliError {
     CliError::Other(format!(
-        "{rel} changed while this command ran (another machine wrote it); nothing was written. \
-         Run the command again."
+        "{rel} changed while this command ran (another machine wrote it), so medrec left it as it \
+         is. Run the command again: a file it already filed is found and indexed, not copied again."
     ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_file_adopts_its_own_earlier_upload_and_never_replaces_another() {
+        let root = crate::testutil::temp_dir("folder-put");
+        let loc = crate::store::Location::Dir(root.join("records"));
+        let st = Store::open(&loc, crate::store::Reads::Fresh, Duration::from_secs(60));
+        create(&st).unwrap();
+        let f = Folder::open_at(&loc, Access::Write, Duration::from_secs(60)).unwrap();
+        let (a, b) = (root.join("a.pdf"), root.join("b.pdf"));
+        std::fs::write(&a, b"aaa").unwrap();
+        std::fs::write(&b, b"bbb").unwrap();
+        let (ma, mb) = (crate::hash::md5_hex(b"aaa"), crate::hash::md5_hex(b"bbb"));
+
+        let first = f.put_new_file(&a, "P/Documents", "x.pdf", &ma).unwrap();
+        assert_eq!(first, "P/Documents/x.pdf");
+        // A run that stopped before its index was saved: the rerun finds
+        // the same bytes and files nothing new.
+        assert_eq!(
+            f.put_new_file(&a, "P/Documents", "x.pdf", &ma).unwrap(),
+            first
+        );
+        assert_eq!(
+            f.put_new_file(&b, "P/Documents", "x.pdf", &mb).unwrap(),
+            "P/Documents/x_2.pdf"
+        );
+        assert_eq!(
+            st.read_text("P/Documents/x.pdf").unwrap().as_deref(),
+            Some("aaa")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn filed_names_follow_the_convention_and_keep_the_original_name() {

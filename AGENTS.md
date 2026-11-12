@@ -70,7 +70,10 @@ copies of `pk-cli-core` are built.
 ## Rules of the code
 
 - A filed document, DICOM file or raw resource is never modified. Changes
-  are new files.
+  are new files, and an upload never replaces a file (`store::Existing::Keep`,
+  `rclone copy --immutable`).
+- On a local folder, medrec's folders are 0700 and its files 0600
+  (`store::private_dirs`, `store::private_copy`).
 - Every write is read back by MD5 before the index points at it. A moved
   source is removed only after that.
 - A command that rewrites `household.json`, an `index.json` or

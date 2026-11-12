@@ -31,7 +31,10 @@ impl Range {
         match date {
             None => self.since.is_none() && self.until.is_none(),
             Some(d) => {
-                let d = &d[..d.len().min(10)];
+                // The day: the first ten characters (an ISO date or the
+                // start of a date-time). By characters, never bytes.
+                let end = d.char_indices().nth(10).map_or(d.len(), |(i, _)| i);
+                let d = &d[..end];
                 self.since.as_deref().is_none_or(|s| d >= s)
                     && self.until.as_deref().is_none_or(|u| d <= u)
             }
@@ -58,6 +61,38 @@ pub struct Event {
     pub source: Option<String>,
 }
 
+/// What `timeline --kind` takes: documents, studies, notes, and every
+/// record kind.
+pub const TIMELINE_KINDS: &[&str] = &[
+    "document",
+    "study",
+    "note",
+    "encounter",
+    "result",
+    "report",
+    "condition",
+    "medication",
+    "allergy",
+    "immunization",
+    "procedure",
+    "coverage",
+    "claim",
+];
+
+/// Refuse a kind `timeline` does not know, so a typo is a usage error and
+/// not an empty list.
+pub fn validate_kinds(kinds: &[String]) -> Result<(), CliError> {
+    for k in kinds {
+        if !TIMELINE_KINDS.contains(&k.as_str()) {
+            return Err(CliError::Usage(format!(
+                "unknown kind `{k}` (known: {})",
+                TIMELINE_KINDS.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn timeline(
     folder: &Folder,
     h: &Household,
@@ -66,6 +101,7 @@ pub fn timeline(
     kinds: &[String],
 ) -> Result<Vec<Event>, CliError> {
     range.validate()?;
+    validate_kinds(kinds)?;
     let want = |k: &str| kinds.is_empty() || kinds.iter().any(|x| x == k);
     let mut out = Vec::new();
     for p in people::selected(h, person)? {
@@ -655,6 +691,23 @@ pub fn notes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_date_is_cut_by_characters_and_an_unknown_kind_is_refused() {
+        let r = Range {
+            since: Some("2026-01-01".into()),
+            until: None,
+        };
+        // Byte 10 falls inside `é`: slicing by bytes would panic.
+        assert!(r.holds(Some("2026-03-0\u{e9}x")));
+        assert!(r.holds(Some("2026-03-04T10:00:00Z")));
+        assert!(!r.holds(Some("2025-12-31")));
+        assert!(validate_kinds(&["result".into(), "claim".into()]).is_ok());
+        assert!(matches!(
+            validate_kinds(&["results".into()]),
+            Err(CliError::Usage(_))
+        ));
+    }
 
     #[test]
     fn all_terms_must_match_and_the_snippet_surrounds_the_first() {

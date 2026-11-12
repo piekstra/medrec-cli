@@ -44,14 +44,20 @@ _review/                      documents intake could not file, and review.json
 
 1. **Filed bytes are never changed.** Documents, DICOM files and raw
    resources are written once and never edited. A re-scan, a second disc or
-   a corrected record is a new file.
+   a corrected record is a new file. An upload never replaces a file: one
+   already at its name with the same bytes is taken as that upload (a run
+   that stopped before writing its index left it there), and one with other
+   bytes stops the command. A new study never shares a folder that exists
+   in Drive but not in the index.
 2. **Every write is read back.** A file is uploaded, its MD5 (as Drive
    reports it) is compared with the local one, and only then does the index
    point at it. A moved source is removed only after that.
 3. **One writer at a time per machine**, through a lock file under the
    per-machine cache. Across machines, `household.json`, `index.json` and
    `review.json` carry a `rev` counter. A write whose `rev` no longer matches
-   the folder's is refused, and the command is run again.
+   the folder's is refused, and the command is run again. Import and
+   `images intake` check the `rev` before uploading, too, and save each
+   study's index entry as soon as it is filed.
 4. **A newer layout is refused.** `household.json` declares `format: 1`. A
    medrec that finds a larger number stops and says to update.
 5. **Rename or move files through medrec**, so the index stays right.
@@ -117,7 +123,8 @@ names), `documents` (linked document ids) and `provenance` (one per source).
 **ImagingStudy**: `id`, `study_uid`, `path`, `date`, `modalities`,
 `body_part`, `description`, `facility`, `accession`, `referring`, `series`
 (`[{uid, number, modality, description, instances: {SOPInstanceUID: file}}]`),
-`instances`, `size`, `report` (a document or record id), `filed_at`,
+`instances`, `size`, `report` (a document or record id), `files` (each
+filed file's MD5 by its path in the study folder, for `verify`), `filed_at`,
 `provenance`.
 
 **ImportRun**, one `medrec import`: `id`, `source_dir`, `stream_sha256`,
@@ -192,5 +199,5 @@ sent arguments the provider rejected), and 5 or anything else becomes 5
 (upstream).
 
 The patient's birth date in the stream must match the person's in
-`household.json`, unless `--force`. A source's first import needs
+`household.json`, unless `--allow-birth-date-mismatch`. A source's first import needs
 `--person`; later imports find the person by the source's patient id.

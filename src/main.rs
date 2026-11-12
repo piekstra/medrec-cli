@@ -110,7 +110,7 @@ struct InitArgs {
     location: String,
     /// Set up medrec in a folder that already holds other files.
     #[arg(long)]
-    force: bool,
+    allow_other_files: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -118,7 +118,10 @@ enum PeopleCmd {
     /// Add a person.
     Add(PersonAddArgs),
     /// List the people.
-    List,
+    List {
+        #[command(flatten)]
+        list: ListArgs,
+    },
     /// One person, with counts of what is filed for them.
     Show { person: String },
     /// Change a person (their folder keeps its name).
@@ -240,7 +243,10 @@ struct IntakeArgs {
 #[derive(Subcommand, Debug)]
 enum ReviewCmd {
     /// What waits for review.
-    List,
+    List {
+        #[command(flatten)]
+        list: ListArgs,
+    },
     /// One item: what medrec read and why it is held.
     Show {
         id: String,
@@ -282,7 +288,7 @@ struct ImportArgs {
     since: Option<String>,
     /// Import even when the source's birth date differs from the person's.
     #[arg(long)]
-    force: bool,
+    allow_birth_date_mismatch: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -294,11 +300,19 @@ enum ProvidersCmd {
 #[derive(Args, Debug, Clone)]
 struct RangeArgs {
     /// From this date, YYYY-MM-DD.
-    #[arg(long)]
+    #[arg(long, value_parser = iso_date)]
     since: Option<String>,
     /// Up to this date, YYYY-MM-DD.
-    #[arg(long)]
+    #[arg(long, value_parser = iso_date)]
     until: Option<String>,
+}
+
+/// A `YYYY-MM-DD` flag, checked as clap parses it: a bad date is a usage
+/// error before anything is read.
+fn iso_date(s: &str) -> Result<String, String> {
+    pk_cli_core::dates::parse_iso(s)
+        .map(|_| s.to_string())
+        .map_err(|e| e.to_string())
 }
 
 impl RangeArgs {
@@ -306,6 +320,24 @@ impl RangeArgs {
         Range {
             since: self.since.clone(),
             until: self.until.clone(),
+        }
+    }
+}
+
+/// `--limit N` (DESIGN.md §1.3): every list command takes it. Unset, a
+/// list is whole; `search` alone defaults to 50 hits.
+#[derive(Args, Debug, Clone)]
+struct ListArgs {
+    /// At most this many items (1 or more; default: all).
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    limit: Option<u64>,
+}
+
+impl ListArgs {
+    fn take<'a, T>(&self, rows: &'a [T]) -> &'a [T] {
+        match self.limit {
+            Some(n) => &rows[..rows.len().min(n as usize)],
+            None => rows,
         }
     }
 }
@@ -319,8 +351,10 @@ struct TimelineArgs {
     /// Only these kinds (document, study, note, encounter, result, report,
     /// condition, medication, allergy, immunization, procedure, coverage,
     /// claim); repeatable.
-    #[arg(long = "kind")]
+    #[arg(long = "kind", value_parser = clap::builder::PossibleValuesParser::new(views::TIMELINE_KINDS))]
     kinds: Vec<String>,
+    #[command(flatten)]
+    list: ListArgs,
 }
 
 #[derive(Args, Debug)]
@@ -332,9 +366,9 @@ struct SearchArgs {
     person: Option<String>,
     #[command(flatten)]
     range: RangeArgs,
-    /// At most this many hits.
-    #[arg(long, default_value_t = 50)]
-    limit: usize,
+    /// At most this many hits (1 or more).
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u64).range(1..))]
+    limit: u64,
 }
 
 #[derive(Args, Debug)]
@@ -346,6 +380,8 @@ struct RecordArgs {
     /// Only current ones (not completed, stopped, resolved or inactive).
     #[arg(long)]
     active: bool,
+    #[command(flatten)]
+    list: ListArgs,
     /// One test or item over time: its code (LOINC, ICD-10, RxNorm, CVX)
     /// or words of its name.
     #[arg(long, value_name = "CODE|NAME")]
@@ -362,6 +398,8 @@ enum DocumentsCmd {
         doc_type: Option<String>,
         #[command(flatten)]
         range: RangeArgs,
+        #[command(flatten)]
+        list: ListArgs,
     },
     /// Open a document from a private local copy.
     Open {
@@ -396,6 +434,8 @@ enum NoteCmd {
         tag: Option<String>,
         #[command(flatten)]
         range: RangeArgs,
+        #[command(flatten)]
+        list: ListArgs,
     },
 }
 
@@ -409,7 +449,7 @@ enum ImagesCmd {
         person: Option<String>,
         /// File even when the study's birth date differs from the person's.
         #[arg(long)]
-        force: bool,
+        allow_birth_date_mismatch: bool,
         #[arg(long)]
         dry_run: bool,
     },
@@ -417,6 +457,8 @@ enum ImagesCmd {
     List {
         #[arg(long)]
         person: Option<String>,
+        #[command(flatten)]
+        list: ListArgs,
     },
     /// One study: its series and report.
     Show { study: String },
@@ -522,7 +564,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             let mut cfg = load(&store)?;
             let loc = Location::parse(&a.location);
             let budget = cfg.rclone_budget();
-            let r = maint::init(&mut cfg, &loc, a.force, budget)?;
+            let r = maint::init(&mut cfg, &loc, a.allow_other_files, budget)?;
             store.save(&cfg)?;
             output::emit(json, "init", to_value(&r), |v| {
                 println!(
@@ -552,7 +594,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         Command::Timeline(a) => {
             let (f, h) = read(&store)?;
             let rows = views::timeline(&f, &h, a.person.as_deref(), &a.range.range(), &a.kinds)?;
-            output::emit(json, "timeline", items(&rows), |v| {
+            output::emit(json, "timeline", items(a.list.take(&rows)), |v| {
                 table(
                     v,
                     &["date", "person_name", "kind", "title", "detail", "source"],
@@ -563,7 +605,14 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         Command::Search(a) => {
             let (f, h) = read(&store)?;
             let q = a.query.join(" ");
-            let rows = views::search(&f, &h, a.person.as_deref(), &q, &a.range.range(), a.limit)?;
+            let rows = views::search(
+                &f,
+                &h,
+                a.person.as_deref(),
+                &q,
+                &a.range.range(),
+                a.limit as usize,
+            )?;
             output::emit(json, "search", items(&rows), |v| {
                 table(
                     v,
@@ -760,9 +809,9 @@ fn people_cmd(cli: &Cli, cmd: &PeopleCmd, store: &ConfigStore) -> Result<(), Cli
             });
             Ok(())
         }
-        PeopleCmd::List => {
+        PeopleCmd::List { list } => {
             let (_, h) = read(store)?;
-            output::emit(json, "person-list", items(&h.people), |v| {
+            output::emit(json, "person-list", items(list.take(&h.people)), |v| {
                 table(v, &["id", "name", "birth_date", "adult", "folder"])
             });
             Ok(())
@@ -886,10 +935,10 @@ fn review_cmd(cli: &Cli, cmd: &ReviewCmd, store: &ConfigStore) -> Result<(), Cli
     let json = cli.common.json;
     let cfg = load(store)?;
     match cmd {
-        ReviewCmd::List => {
+        ReviewCmd::List { list } => {
             let f = Folder::open(&cfg, Access::Read)?;
             let rows = review::list(&f)?;
-            output::emit(json, "review-list", items(&rows), |v| {
+            output::emit(json, "review-list", items(list.take(&rows)), |v| {
                 table(v, &["id", "received_at", "original_name", "reasons"])
             });
         }
@@ -964,7 +1013,7 @@ fn import_cmd(cli: &Cli, a: &ImportArgs, store: &ConfigStore) -> Result<(), CliE
             person: a.person.clone(),
             since: a.since.clone(),
             org: a.org.clone(),
-            force: a.force,
+            allow_birth_date_mismatch: a.allow_birth_date_mismatch,
         },
     )?;
     output::emit(json, "import", to_value(&r), |_| {
@@ -1001,7 +1050,7 @@ fn records_cmd(
     output::emit(
         cli.common.json,
         &format!("{record}-list"),
-        items(&rows),
+        items(a.list.take(&rows)),
         |v| {
             table(
                 v,
@@ -1036,6 +1085,7 @@ fn documents_cmd(cli: &Cli, cmd: &DocumentsCmd, store: &ConfigStore) -> Result<(
             person,
             doc_type,
             range,
+            list,
         } => {
             let (f, h) = read(store)?;
             let rows = views::documents(
@@ -1045,7 +1095,7 @@ fn documents_cmd(cli: &Cli, cmd: &DocumentsCmd, store: &ConfigStore) -> Result<(
                 doc_type.as_deref(),
                 &range.range(),
             )?;
-            output::emit(json, "document-list", items(&rows), |v| {
+            output::emit(json, "document-list", items(list.take(&rows)), |v| {
                 table(
                     v,
                     &[
@@ -1127,11 +1177,16 @@ fn note_cmd(cli: &Cli, cmd: &NoteCmd, store: &ConfigStore) -> Result<(), CliErro
                 |_| println!("added note {} for {} on {}", n.id, p.name, n.date),
             );
         }
-        NoteCmd::List { person, tag, range } => {
+        NoteCmd::List {
+            person,
+            tag,
+            range,
+            list,
+        } => {
             let f = Folder::open(&cfg, Access::Read)?;
             let h = f.household()?;
             let rows = views::notes(&f, &h, person.as_deref(), tag.as_deref(), &range.range())?;
-            output::emit(json, "note-list", items(&rows), |v| {
+            output::emit(json, "note-list", items(list.take(&rows)), |v| {
                 table(v, &["date", "person_name", "tags", "text"])
             });
         }
@@ -1146,7 +1201,7 @@ fn images_cmd(cli: &Cli, cmd: &ImagesCmd, store: &ConfigStore) -> Result<(), Cli
         ImagesCmd::Intake {
             path,
             person,
-            force,
+            allow_birth_date_mismatch,
             dry_run,
         } => {
             let f = Folder::open(
@@ -1162,7 +1217,7 @@ fn images_cmd(cli: &Cli, cmd: &ImagesCmd, store: &ConfigStore) -> Result<(), Cli
                 &imaging::IntakeRequest {
                     path: path.clone(),
                     person: person.clone(),
-                    force: *force,
+                    allow_birth_date_mismatch: *allow_birth_date_mismatch,
                     dry_run: *dry_run,
                     interactive: cli.common.interactive(),
                 },
@@ -1190,11 +1245,11 @@ fn images_cmd(cli: &Cli, cmd: &ImagesCmd, store: &ConfigStore) -> Result<(), Cli
                 }
             });
         }
-        ImagesCmd::List { person } => {
+        ImagesCmd::List { person, list } => {
             let f = Folder::open(&cfg, Access::Read)?;
             let h = f.household()?;
             let rows = imaging::list(&f, &h, person.as_deref())?;
-            output::emit(json, "study-list", items(&rows), |v| {
+            output::emit(json, "study-list", items(list.take(&rows)), |v| {
                 table(
                     v,
                     &[
