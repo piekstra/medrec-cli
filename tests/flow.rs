@@ -701,3 +701,24 @@ fn the_birth_date_checks_have_their_own_flag() {
     assert_eq!(v["studies"][0]["status"], "would_file");
     let _ = std::fs::remove_dir_all(Path::new(&e.root));
 }
+
+#[test]
+fn a_scan_under_tmp_is_read_by_ocr() {
+    if !has("tesseract") || !has("pdftoppm") {
+        eprintln!("skipped: tesseract or pdftoppm is not installed");
+        return;
+    }
+    let e = Env::new("ocr-tmp");
+    setup(&e);
+    let scans = e.root.join("scans");
+    medrec::testdata::write_scans(&scans);
+    let png = scans.join("scan_visit_alex.png");
+    // A literal /tmp path: on macOS, the image library tesseract reads with
+    // rewrites a leading /tmp to the per-user temporary directory.
+    let under_tmp = PathBuf::from(format!("/tmp/medrec-flow-ocr-{}.png", std::process::id()));
+    std::fs::copy(&png, &under_tmp).unwrap();
+    let r = e.ok(&["intake", under_tmp.to_str().unwrap()]);
+    let _ = std::fs::remove_file(&under_tmp);
+    assert_eq!(r["items"][0]["status"], "filed", "{r}");
+    let _ = std::fs::remove_dir_all(Path::new(&e.root));
+}
